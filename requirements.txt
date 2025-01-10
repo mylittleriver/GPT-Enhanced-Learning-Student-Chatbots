@@ -1,0 +1,13 @@
+langchain
+openai
+duckduckgo-search
+trubrics
+st-pages
+streamlit
+pymongo
+streamlit_modal
+flask
+plotly
+streamlit-cookies-controller
+streamlit_lottie
+tiktoken
