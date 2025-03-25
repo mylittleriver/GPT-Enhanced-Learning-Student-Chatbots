@@ -17,6 +17,7 @@ import requests
 from flask import Flask, request
 from streamlit_cookies_controller import CookieController, RemoveEmptyElementContainer
 import os
+from dotenv import load_dotenv
 
 def decrypt_uid(encrypted_uid: str, key: str) -> str:
     if encrypted_uid:
@@ -80,14 +81,18 @@ if cookie_uid:
         else:
             st.session_state['admin']=False
 
-    azure_key = "c42959fcc37648f0bdee8ed85f0ea6ea"
-    azure_endpoint = "https://abchan-fite-gpt.openai.azure.com/"
-    azure_version = "2023-07-01-preview"
+    load_dotenv()
+
+    azure_key = os.getenv("AZURE_KEY")
+    azure_endpoint = os.getenv("AZURE_ENDPOINT")
+    azure_version = os.getenv("AZURE_VERSION")
+    azure_deployment = os.getenv("AZURE_DEPLOYMENT")
 
     client = openai.AzureOpenAI(
         api_key=azure_key,
         api_version = azure_version,
-        azure_endpoint = azure_endpoint
+        azure_endpoint = azure_endpoint,
+        azure_deployment=azure_deployment
     )
 
     # if "show_modal" not in st.session_state:
@@ -100,29 +105,38 @@ if cookie_uid:
     #     st.session_state["show_modal"] = False
 
     def create_connection():
-        conn = sqlite3.connect('chatbot.db')
+        # conn = sqlite3.connect('chatbot.db')
+        conn = sqlite3.connect("/app/chatbot.db", timeout=10)  # 设置超时时间，避免锁冲突
+        # conn.execute("PRAGMA journal_mode=WAL;")  # 启用 WAL 模式，允许多个进程访问
         return conn
 
-    conn = create_connection()
-    cursor = conn.cursor()
 
-    def insert_question(conn, q_id, question_text, course_id):
+    def insert_question(q_id, question_text, course_id):
+        conn = create_connection()
         sql = '''INSERT INTO tutee_questions(q_id, q_content, course_id) VALUES(?,?, ?)'''
         cur = conn.cursor()
         cur.execute(sql, (q_id,question_text, course_id))
         conn.commit()
+        cur.close()
+        conn.close()
 
 
-    def fetch_tutee_questions(conn, course_id):
+    def fetch_tutee_questions(course_id):
+        conn = create_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT q_content FROM tutee_questions WHERE course_id = ?", (course_id,))
         questions=[row[0] for row in cursor.fetchall()]
+        cursor.close()
+        conn.close()
         return questions
 
-    def fetch_all_questions(conn, course_id):
+    def fetch_all_questions(course_id):
+        conn = create_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT q_id, q_content FROM all_questions WHERE course_id = ?", (course_id,))
         questions = cursor.fetchall()
+        cursor.close()
+        conn.close()
         return questions
 
 
@@ -156,7 +170,7 @@ if cookie_uid:
 
 
     if "random_question" not in st.session_state:
-        st.session_state["random_question"] = fetch_tutee_questions(conn, course_id)
+        st.session_state["random_question"] = fetch_tutee_questions(course_id)
 
     custom_css = """
     <style>
@@ -211,6 +225,8 @@ if cookie_uid:
                 st.session_state['admin']=not st.session_state['admin']
         
         if course_data:
+            conn = create_connection()
+            cursor = conn.cursor()
             cursor.execute('''
                 SELECT * FROM system_prompt
                 WHERE course_id = ? AND chatbot_type = ?
@@ -218,7 +234,8 @@ if cookie_uid:
                 LIMIT 1;
             ''', (course_id, 'tutee'))
             latest_record = cursor.fetchone()
-            # st.write("latest_record",latest_record)
+            cursor.close()
+            conn.close()
             if latest_record and st.session_state["tutee_messages"][0]["content"]=='':
                 st.session_state["tutee_messages"][0]["content"] = latest_record[0]
             else:
@@ -241,7 +258,6 @@ if cookie_uid:
                     you will be provided with hints.
                     You will be continuously prompted 
                     until you get the correct answer and the user says you are correct.
-                    End each response with "Am I correct?" to check if you are correct.
                 '''
                 if st.session_state["tutee_messages"][0]["content"]=='':
                     st.session_state["tutee_messages"][0]["content"] = formatted_prompt
@@ -273,6 +289,9 @@ if cookie_uid:
                         VALUES (?, ?, ?, ?)
                     ''', (new_system_prompt,course_id, uid, 'tutee'))
                     conn.commit()
+                    cursor.close()
+                    conn.close()
+
                     st.success("System prompt updated successfully!")
                     st.rerun()
 
@@ -284,7 +303,7 @@ if cookie_uid:
         if st.session_state['admin']:
             with st.form("add_question"):
                 st.markdown('<label class="admin-label">Add New Tutee Question</label>', unsafe_allow_html=True)
-                questions=fetch_all_questions(conn, course_id)
+                questions=fetch_all_questions(course_id)
                 question_dict = {q_content: q_id for q_id, q_content in questions}
 
                 select_question = st.selectbox(
@@ -296,7 +315,7 @@ if cookie_uid:
                 if add_question:
                     if select_question:
                         q_id = question_dict[select_question]
-                        insert_question(conn, q_id, select_question, course_id)
+                        insert_question(q_id, select_question, course_id)
                         st.sidebar.success("Question added successfully!")
                     else:
                         st.sidebar.warning("Please enter a question.")
@@ -306,13 +325,13 @@ if cookie_uid:
 
                 if add_question:
                     if input_question:
-                        insert_question(conn, generate_id(), input_question, course_id)
+                        insert_question(generate_id(), input_question, course_id)
                         st.sidebar.success("Question added successfully!")
                     else:
                         st.sidebar.warning("Please enter a question.")
                 
         with st.form("select tutee question"):
-            questions=fetch_tutee_questions(conn, course_id)
+            questions=fetch_tutee_questions(course_id)
             select_question = st.selectbox(
                     "Select Tutee Question",
                     questions
@@ -320,6 +339,8 @@ if cookie_uid:
             generate_question = st.form_submit_button("Generate Question",help='ask a question for the tutee chatbot to answer')
             if select_question:
                 if generate_question:
+                    conn = create_connection()
+                    cursor = conn.cursor()
                     cursor.execute('''
                         SELECT * FROM system_prompt
                         WHERE course_id = ? AND chatbot_type = ?
@@ -327,6 +348,8 @@ if cookie_uid:
                         LIMIT 1;
                     ''', (course_id, 'tutee'))
                     latest_record = cursor.fetchone()
+                    cursor.close()
+                    conn.close()
                     # st.write("latest_record",latest_record)
                     if latest_record:
                         st.session_state["tutee_messages"] = [
@@ -355,12 +378,6 @@ if cookie_uid:
                     if total_token_count>tokens_left:
                         st.error("Quota for this course has been exceeded.")
                     else:
-                        result = db.users.update_one(
-                            {'user_id': uid}, 
-                            {'$inc': {'tokens_used': total_token_count}}  
-                        )
-                        if result.matched_count == 0:
-                            st.write("No token record found with that user_id.")
                         # placeholder = st.empty()
                         # placeholder.markdown('<div class="busy-icon"></div>', unsafe_allow_html=True)
                         st.session_state['generate_question']=select_question
@@ -368,7 +385,8 @@ if cookie_uid:
         generate_random=st.button("Generate Random Question",help='ask a random question from the list for the tutee chatbot to answer')            
         if st.session_state['random_question']:
             if generate_random:
-                
+                conn = create_connection()
+                cursor = conn.cursor()
                 cursor.execute('''
                     SELECT * FROM system_prompt
                     WHERE course_id = ? AND chatbot_type = ?
@@ -376,6 +394,8 @@ if cookie_uid:
                     LIMIT 1;
                 ''', (course_id, 'tutee'))
                 latest_record = cursor.fetchone()
+                cursor.close()
+                conn.close()
 
                 if latest_record:
                 
@@ -397,8 +417,7 @@ if cookie_uid:
                     #     you will be provided with hints.
                     #     You will be continuously prompted 
                     #     until you get the correct answer.
-                    #     End each response with "Am I correct?" to check if you are correct.
-                    #     '''
+                     #     '''
                         }
                     ]
                 i=random.randint(0,len(st.session_state["random_question"])-1)
@@ -427,12 +446,6 @@ if cookie_uid:
                 if total_token_count>tokens_left:
                     st.error("Quota for this course has been exceeded.")
                 else:
-                    result = db.users.update_one(
-                        {'user_id': uid}, 
-                        {'$inc': {'tokens_used': total_token_count}}  
-                    )
-                    if result.matched_count == 0:
-                        st.write("No token record found with that user_id.")
                     # placeholder = st.empty()
                     # placeholder.markdown('<div class="busy-icon"></div>', unsafe_allow_html=True)
                     st.session_state['generate_random']=select_question
@@ -441,21 +454,93 @@ if cookie_uid:
         st.write("Support: If you encounter any issues or have any feedback, please reach out to the team via email at: gel.support@cityu.edu.hk.")
 
 
+    block_latex_pattern = re.compile(r"\\\[(.*?)\\\]", re.DOTALL)  # 块级公式 `\[ ... \]`
+    inline_latex_pattern = re.compile(r"\\\((.*?)\\\)|(?<!\\)\$(.*?)\$(?!\s*})")  # 行内公式 `\( ... \)` 和 `$...$`
+
+    def replace_inline_latex(text):
+        return inline_latex_pattern.sub(lambda m: f"${m.group(1) or m.group(2)}$", text)
+
+    def parse_message(content):
+        elements = []
+        last_pos = 0
+
+        # 解析块级公式
+        for match in block_latex_pattern.finditer(content):
+            start, end = match.span()
+            text_before = content[last_pos:start].strip()
+            latex_code = match.group(1).strip()
+            
+            if text_before:
+                elements.append(("text", replace_inline_latex(text_before)))  # 处理行内公式
+            elements.append(("latex", latex_code))  # 添加 LaTeX 公式
+            last_pos = end
+
+        # 处理剩余部分
+        remaining_text = content[last_pos:].strip() if last_pos < len(content) else ""
+        if remaining_text:
+            formatted_text = replace_inline_latex(remaining_text)
+            elements.append(("markdown", formatted_text))
+
+        return elements
+
+    def render_message(content):
+        elements = parse_message(content)
+        for elem_type, elem_content in elements:
+            if elem_type == "latex":
+                st.latex(rf"""{elem_content}""")  # 直接渲染 LaTeX 公式
+            elif elem_type == "markdown":
+                st.markdown(elem_content, unsafe_allow_html=True)  # 解析行内公式
+            else:
+                st.write(elem_content)
 
 
     for msg in st.session_state.tutee_messages:
         # if msg["role"] == "system":
         #     st.chat_message("system").write(msg["content"])
         if msg["role"] == "assistant":
-            st.chat_message("assistant").write(msg["content"])
+            with st.chat_message("assistant"):
+                render_message(msg["content"]) 
         elif msg["role"] == "user":
             st.chat_message("user").write(msg["content"])
+
+    def render_streamed_text(text, placeholder):
+        elements = []
+        last_pos = 0
+
+        # 处理块级公式
+        for match in block_latex_pattern.finditer(text):
+            start, end = match.span()
+            text_before = text[last_pos:start].strip()
+            latex_code = match.group(1).strip()
+
+            if text_before:
+                elements.append(("text", replace_inline_latex(text_before)))  # 处理行内公式
+            elements.append(("latex", latex_code))  # 块级公式
+            last_pos = end
+
+        # 处理剩余部分（包括行内公式）
+        remaining_text = text[last_pos:].strip() if last_pos < len(text) else ""
+        if remaining_text:
+            formatted_text = replace_inline_latex(remaining_text)  # 处理行内公式
+            elements.append(("markdown", formatted_text))
+
+        # **流式渲染**
+        with placeholder.chat_message("assistant"):
+            for elem_type, elem_content in elements:
+                if elem_type == "latex":
+                    st.latex(rf"""{elem_content}""")  # 块级公式
+                elif elem_type == "markdown":
+                    st.markdown(elem_content, unsafe_allow_html=True)  # 行内公式
+                else:
+                    st.write(elem_content)
+
     if st.session_state['generate_question']:
         prmp=[]
         question=st.session_state['generate_question']
         prmp.append({"role": "user", "content": question})
         response = client.chat.completions.create(
-            model="gpt-35-turbo-0613", 
+            # model="gpt-35-turbo-0613", 
+            model="gpt-4o-mini",
             messages=prmp,
             stream=True    
         )
@@ -463,12 +548,11 @@ if cookie_uid:
         placeholder = st.empty()
         placeholder.markdown('<div class="busy-icon"></div>', unsafe_allow_html=True)
 
-        for chunk in response:  # Iterate over the stream
-            if len(chunk.choices) > 0:
-                # st.write("chunk.choices[0].delta.content",chunk.choices[0].delta.content)
-                if chunk.choices[0].delta.content:
-                    messages.append(chunk.choices[0].delta.content)
-                    placeholder.chat_message("assistant").write(''.join(messages))
+        for chunk in response:
+                if len(chunk.choices) > 0 and chunk.choices[0].delta.content:
+                    messages.append(chunk.choices[0].delta.content)  # 累积 GPT 输出
+                    render_streamed_text(''.join(messages), placeholder) 
+
         assistant_msg = ''.join(messages)
         encoding = tiktoken.encoding_for_model("gpt-3.5-turbo")
         tokens = encoding.encode(assistant_msg)
@@ -498,7 +582,14 @@ if cookie_uid:
         )
         db.users.update_one(
             {'user_id': uid}, 
-            {'$inc': {'tokens_used': total_token_count+ completion_tokens}}  
+            {'$inc': {'tokens_used': total_token_count+ completion_tokens
+                    # ,'tokens_available': -(total_token_count + completion_tokens)
+                    }}  
+        )
+        db.courses.update_one(
+            {"course_id": course_id},
+            {"$inc": {"tutee_questions_count": 1}},
+            upsert=True  # Creates field if not exists
         )
         st.session_state['generate_question']=False
         
@@ -507,7 +598,8 @@ if cookie_uid:
         random_question=st.session_state['generate_random']
         prmp.append({"role": "user", "content": random_question})
         response = client.chat.completions.create(
-            model="gpt-35-turbo-0613", 
+            # model="gpt-35-turbo-0613", 
+            model="gpt-4o-mini",
             messages=prmp,
             stream=True    
         )
@@ -515,12 +607,11 @@ if cookie_uid:
         placeholder = st.empty()
         placeholder.markdown('<div class="busy-icon"></div>', unsafe_allow_html=True)
 
-        for chunk in response:  # Iterate over the stream
-            if len(chunk.choices) > 0:
-                # st.write("chunk.choices[0].delta.content",chunk.choices[0].delta.content)
-                if chunk.choices[0].delta.content:
-                    messages.append(chunk.choices[0].delta.content)
-                    placeholder.chat_message("assistant").write(''.join(messages))
+        for chunk in response:
+                if len(chunk.choices) > 0 and chunk.choices[0].delta.content:
+                    messages.append(chunk.choices[0].delta.content)  # 累积 GPT 输出
+                    render_streamed_text(''.join(messages), placeholder) 
+
         assistant_msg = ''.join(messages)
         encoding = tiktoken.encoding_for_model("gpt-3.5-turbo")
         tokens = encoding.encode(assistant_msg)
@@ -550,7 +641,14 @@ if cookie_uid:
         )
         db.users.update_one(
             {'user_id': uid}, 
-            {'$inc': {'tokens_used': total_token_count+ completion_tokens}}  
+            {'$inc': {'tokens_used': total_token_count+ completion_tokens
+                    # ,'tokens_available': -(total_token_count + completion_tokens)
+                    }}  
+        )
+        db.courses.update_one(
+            {"course_id": course_id},
+            {"$inc": {"tutee_questions_count": 1}},
+            upsert=True  # Creates field if not exists
         )
         st.session_state['generate_random']=False
 
@@ -581,28 +679,23 @@ if cookie_uid:
         if total_token_count>tokens_left:
             st.error("Quota for this course has been exceeded.")
         else:
-            result = db.users.update_one(
-                {'user_id': uid}, 
-                {'$inc': {'tokens_used': total_token_count}}  
-            )
-            if result.matched_count == 0:
-                st.write("No token record found with that user_id.")
+
             placeholder = st.empty()
             placeholder.markdown('<div class="busy-icon"></div>', unsafe_allow_html=True)
 
             response = client.chat.completions.create(
-                model="gpt-35-turbo-0613", 
+                # model="gpt-35-turbo-0613", 
+                model="gpt-4o-mini",
                 messages=st.session_state["tutee_messages"],
                 stream=True    
             )
             messages = []
 
-            for chunk in response:  # Iterate over the stream
-                if len(chunk.choices) > 0:
-                    # st.write("chunk.choices[0].delta.content",chunk.choices[0].delta.content)
-                    if chunk.choices[0].delta.content:
-                        messages.append(chunk.choices[0].delta.content)
-                        placeholder.chat_message("assistant").write(''.join(messages))
+            for chunk in response:
+                if len(chunk.choices) > 0 and chunk.choices[0].delta.content:
+                    messages.append(chunk.choices[0].delta.content)  # 累积 GPT 输出
+                    render_streamed_text(''.join(messages), placeholder) 
+                    
             assistant_msg = ''.join(messages)
             encoding = tiktoken.encoding_for_model("gpt-3.5-turbo")
             tokens = encoding.encode(assistant_msg)
@@ -634,11 +727,18 @@ if cookie_uid:
             )
             db.users.update_one(
                 {'user_id': uid}, 
-                {'$inc': {'tokens_used': total_token_count+ completion_tokens}}  
+                {'$inc': {'tokens_used': total_token_count+ completion_tokens
+                    # ,'tokens_available': -(total_token_count + completion_tokens)
+                    }}  
+            )
+            # Update tutee question count for course
+            db.courses.update_one(
+                {"course_id": course_id},
+                {"$inc": {"tutee_questions_count": 1}},
+                upsert=True  # Creates field if not exists
             )
 
-
-
     st.caption("Use Shift+Enter to add a new line.")
-    conn.close()
+    # cursor.close()
+    # conn.close()
 

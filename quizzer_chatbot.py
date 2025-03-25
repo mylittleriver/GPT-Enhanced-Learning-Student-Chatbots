@@ -6,6 +6,8 @@ import openai
 import base64
 import json
 import streamlit as st
+import os
+from dotenv import load_dotenv
 from streamlit_modal import Modal
 from streamlit_lottie import st_lottie
 
@@ -17,6 +19,7 @@ import requests
 from flask import Flask, request
 from streamlit_cookies_controller import CookieController, RemoveEmptyElementContainer
 import os
+import time
 
 
 def decrypt_uid(encrypted_uid: str, key: str) -> str:
@@ -28,7 +31,8 @@ def decrypt_uid(encrypted_uid: str, key: str) -> str:
 
 def format_message(msg):
     msg = re.sub(r'<topic>(.*?)</topic>', r'**\1**', msg)
-    msg = re.sub(r'<question>(.*?)</question>', r'\n\1', msg)
+    msg = re.sub(r'<question>(.*?)', r'\n\1', msg)
+    msg = re.sub(r'(.*?)</question>', r' \1', msg)
     return msg
     
 controller = CookieController()
@@ -79,7 +83,7 @@ if cookie_uid:
     
     topic_id=st.session_state['topic_id_quizzer']
 
-    encoding = tiktoken.encoding_for_model("gpt-35-turbo-0613")
+    encoding = tiktoken.encoding_for_model("gpt-4o-mini")
 
 
     if 'admin' not in st.session_state:
@@ -88,48 +92,78 @@ if cookie_uid:
         else:
             st.session_state['admin']=False
 
-    # Azure API credentials
-    azure_key = "c42959fcc37648f0bdee8ed85f0ea6ea"
-    azure_endpoint = "https://abchan-fite-gpt.openai.azure.com/"
-    azure_version = "2023-07-01-preview"
+    load_dotenv()
+
+    azure_key = os.getenv("AZURE_KEY")
+    azure_endpoint = os.getenv("AZURE_ENDPOINT")
+    azure_version = os.getenv("AZURE_VERSION")
+    azure_deployment = os.getenv("AZURE_DEPLOYMENT")
 
     client = openai.AzureOpenAI(
         api_key=azure_key,
         api_version=azure_version,
-        azure_endpoint=azure_endpoint
+        azure_endpoint=azure_endpoint,
+        azure_deployment=azure_deployment
     )
 
-    # Database connection
     def create_connection():
-        conn = sqlite3.connect('chatbot.db')
-        return conn
+        try:
+            conn = sqlite3.connect("/app/chatbot.db", timeout=10, check_same_thread=False)
+            conn.execute("PRAGMA journal_mode=WAL;")  
+            return conn
+        except sqlite3.Error as e:
+            print(f"Database connection error: {e}")
+            return None
 
-    def fetch_quizzes(conn,course_id):
+    def fetch_quizzes(course_id):
+        conn = create_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT DISTINCT quiz_name FROM quiz_topic WHERE course_id = ?", (course_id,))
         quizzes = [row[0] for row in cursor.fetchall()]
+        cursor.close()
+        conn.close()
         return quizzes
 
 
-    def fetch_topics(conn, quiz_name, course_id):
+    def fetch_topics(quiz_name, course_id):
+        conn = create_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT topic FROM quiz_topic WHERE quiz_name = ? AND course_id = ?", (quiz_name, course_id))
         topics = [row[0] for row in cursor.fetchall()]
+        cursor.close()
+        conn.close()
+        
         return topics
 
-    def insert_quiz_topic(conn, quiz, topic,course_id):
-        sql_insert = '''INSERT INTO quiz_topic(qt_id,quiz_name, topic, course_id) VALUES(?,?, ?, ?)'''
-        cur = conn.cursor()
-        cur.execute(sql_insert, (generate_id(),quiz, topic, course_id))
-        conn.commit()
+    def insert_quiz_topic(quiz, topic, course_id):
+        sql_insert = '''INSERT INTO quiz_topic(qt_id, quiz_name, topic, course_id) VALUES(?, ?, ?, ?)'''
+        try:
+            conn = create_connection()
+            cursor = conn.cursor()
+            qt_id = generate_id()  
+            cursor.execute(sql_insert, (qt_id, quiz, topic, course_id))
+            conn.commit()
+        except sqlite3.IntegrityError as e:
+            print(f"Integrity error: {e}") 
+        except sqlite3.Error as e:
+            print(f"Database error: {e}")
+        finally:
+            if cursor:
+                cursor.close()
+            if conn:
+                conn.close()
 
-    def db_delete_quiz(conn, quiz_name, course_id):
+
+
+    def db_delete_quiz(quiz_name, course_id):
+        conn = create_connection()
         cursor = conn.cursor()
         cursor.execute("DELETE FROM quiz_topic WHERE quiz_name = ? AND course_id = ?", (quiz_name, course_id))
+        
         conn.commit()
+        cursor.close()
+        conn.close()
 
-    conn = create_connection()
-    cursor = conn.cursor()
 
     # Page setup
 
@@ -232,6 +266,8 @@ if cookie_uid:
 
         
         if course_data:
+            conn = create_connection()
+            cursor = conn.cursor()
             cursor.execute('''
                 SELECT * FROM system_prompt
                 WHERE course_id = ? AND chatbot_type = ?
@@ -239,7 +275,8 @@ if cookie_uid:
                 LIMIT 1;
             ''', (course_id, 'quizzer'))
             latest_record = cursor.fetchone()
-
+            cursor.close()
+            conn.close()
             if latest_record and st.session_state["quizzer_messages"][0]["content"]=='':
                 st.session_state["quizzer_messages"][0]["content"] = latest_record[0]
             else:
@@ -247,21 +284,27 @@ if cookie_uid:
                 course_name = course_data.get('course_name', '')
                 course_description = course_data.get('course_description', '')
                 course_prompt = course_data.get('course_prompt', '')
+                question_data = db.questions.find_one({"course_id": course_id})
+                if question_data:
+                    q_content = question_data.get('q_content', '')
+                else:
+                    q_content = ''
+                specific_topic=str(q_content)
                 # Format the course_prompt with the retrieved data
                 formatted_prompt = f'''
-                    You are a quizzer that generates questions about the {course_department} course {course_name}. 
+                    You are a quizzer that generates quiz uestions about the {course_department} course {course_name}. 
                     Course Description: {course_description}
                     You are friendly and concise. You will be asked to generate  
                     a question on a particular topic. 
                     You need to ask a concrete question that has an explicit answer. For example, instead of asking "What is Bayesian estimation?", you should ask a certain application problem of Bayesian estimation or a calculation problem, so that the student can give an explicit answer instead of abstract concepts. 
+                    You can only generate very specific questions like the following example shows: {specific_topic}.
+                    Any unspecific questions are prohibited.
                     The student will respond, and you will check the student's response. 
                     The student can then ask for more explanation, or get the next question. 
-                    You need to keep a list of questions already asked in the session to prevent repeating questions. 
                     You can also generate incorrect code (e.g., syntax or logical errors) that needs debugging. 
                     The student then tries to fix the code, and you check the result. 
+                    Mark the beginning and end of a topic with <topic> and </topic>. For example, if the topic is Java Syntax, output <topic>Java Syntax</topic>. After the topic, give the question.
                     Mark the beginning and end of a question with <question> and </question>. 
-                    Mark the beginning and end of a topic with <topic> and </topic>. For example, if the topic is Java Syntax, output <topic>Java Syntax</topic>.
-                    Generate only one question for one topic at one time.
                     If the answer is correct, respond with <correct>. If the answer is incorrect, respond with <incorrect>.
                     If you can't give <correct> or <incorrect> because the user doesn't know the answer or directly asks for explanation, end your response with "Do you want further explanation or next question?"
                 '''
@@ -294,6 +337,8 @@ if cookie_uid:
                         VALUES (?, ?, ?, ?)
                     ''', (new_system_prompt,course_id, uid, 'quizzer'))
                     conn.commit()
+                    cursor.close()
+                    conn.close()
                     st.success("System prompt updated successfully!")
                     st.rerun()
             if st.button("Update System Prompt"):
@@ -305,7 +350,7 @@ if cookie_uid:
                 st.markdown('<label class="admin-label">Customize Quiz</label>', unsafe_allow_html=True)
                 quiz_name_input = st.text_input("Enter Quiz Name:")
                 quiz_topic_input = st.text_input("Enter Topic:")
-                add_topic=st.form_submit_button("Add Topic")
+                add_topic=st.form_submit_button("Add Topic",help="please input topic names as specific as possible")
                 if add_topic:
                     if quiz_topic_input and quiz_topic_input not in st.session_state["t_list"]:
                         st.session_state["t_list"].append(quiz_topic_input)
@@ -316,7 +361,8 @@ if cookie_uid:
                 if add_quiz:
                     if quiz_name_input and quiz_topic_input:
                         for topic in st.session_state["t_list"]:
-                            insert_quiz_topic(conn, quiz_name_input, topic, course_id)
+                            insert_quiz_topic(quiz_name_input, topic, course_id)
+                        
                         st.sidebar.success(f"Quiz {quiz_name_input} added successfully!")
                         st.session_state["t_list"]=[]
                         
@@ -325,7 +371,7 @@ if cookie_uid:
                     elif not quiz_name_input:
                         st.sidebar.warning("Please enter a quiz name.")
                 
-                quizzes=fetch_quizzes(conn,course_id)
+                quizzes=fetch_quizzes(course_id)
                 if quizzes:
                     select_quiz = st.selectbox(
                         "Select Quiz",
@@ -333,17 +379,17 @@ if cookie_uid:
                         key="select_quiz_key"
                     )
 
-                    topics = fetch_topics(conn, select_quiz, course_id)
+                    topics = fetch_topics(select_quiz, course_id)
                     st.write(f"Topics in {select_quiz}: {topics}")
                     delete_quiz = st.form_submit_button("Delete Quiz")
                     practice_quiz = st.form_submit_button("Practice Quiz",help="You need to End Quiz before generating a new quiz.")
                     if delete_quiz:
-                        db_delete_quiz(conn, select_quiz, course_id)
+                        db_delete_quiz(select_quiz, course_id)
                         st.success(f"Quiz '{select_quiz}' has been deleted.")
-                        quizzes = fetch_quizzes(conn, course_id)
+                        quizzes = fetch_quizzes(course_id)
                         st.rerun()
                     if practice_quiz:
-                        topic_message = f"Generate a quiz question randomly from one of the following topics: {topics}"
+                        topic_message = f"Generate a specific quiz question randomly from one of the following topics: {topics}. Avoid conceptual questions."
                         st.session_state["quizzer_messages"].append({"role": "user", "content": topic_message})
                         if st.session_state['topic_not_inserted_quizzer']:
                             db.topics.insert_one(
@@ -351,10 +397,15 @@ if cookie_uid:
                                     "topic_id": st.session_state['topic_id_quizzer'],
                                     "user_id": uid,
                                     "course_id": course_id,
-                                    "latest_gpt_ver": 'gpt-35-turbo-0613',
+                                    "latest_gpt_ver": 'gpt-4o-mini',
                                     "chat_title": 'general',
                                     "chatbot_type": "quizzer"
                                 }
+                            )
+                            db.courses.update_one(
+                                {"course_id": course_id},
+                                {"$inc": {"quizzes_count": 1}},
+                                upsert=True
                             )
                             st.session_state['topic_not_inserted_quizzer']=False
                         total_token_count = sum(len(encoding.encode(message["content"])) for message in st.session_state["quizzer_messages"])
@@ -368,12 +419,6 @@ if cookie_uid:
                         if total_token_count>tokens_left:
                             st.error("Quota for this course has been exceeded.")
                         else:
-                            result = db.users.update_one(
-                                {'user_id': uid}, 
-                                {'$inc': {'tokens_used': total_token_count}}  
-                            )
-                            if result.matched_count == 0:
-                                st.write("No token record found with that user_id.")
                             st.sidebar.success(f"Quiz updated: {select_quiz}")
                             st.session_state["practice_quiz_usr"]=topic_message
                             st.session_state["practice_quiz"]=st.session_state["quizzer_messages"]
@@ -381,19 +426,19 @@ if cookie_uid:
                     st.warning("No quizzes available for this course.")   
                     
         with st.form("generate_quiz"):
-            quizzes=fetch_quizzes(conn,course_id)
+            quizzes=fetch_quizzes(course_id)
             select_quiz = st.selectbox(
                 "Select Quiz",
                 quizzes
             )
-            topics=fetch_topics(conn, select_quiz, course_id)
+            topics=fetch_topics(select_quiz, course_id)
             st.write(f"Topics in {select_quiz}: {topics}")
             
             generate_quiz = st.form_submit_button("Generate Quiz",help="You need to End Quiz before generating a new quiz.")
             if select_quiz:
                 if generate_quiz:
                 
-                    topic_message = f"Generate a quiz question randomly from one of the following topics: {topics}"
+                    topic_message = f"Generate a specific quiz question randomly from one of the following topics: {topics}. Avoid conceptual questions and questions like 'what is [a concept]'."
                     st.session_state["quizzer_messages"].append({"role": "user", "content": topic_message})
                     if st.session_state['topic_not_inserted_quizzer']:
                         db.topics.insert_one(
@@ -401,10 +446,15 @@ if cookie_uid:
                                 "topic_id": st.session_state['topic_id_quizzer'],
                                 "user_id": uid,
                                 "course_id": course_id,
-                                "latest_gpt_ver": 'gpt-35-turbo-0613',
+                                "latest_gpt_ver": 'gpt-4o-mini',
                                 "chat_title": 'general',
                                 "chatbot_type": "quizzer"
                             }
+                        )
+                        db.courses.update_one(
+                            {"course_id": course_id},
+                            {"$inc": {"quizzes_count": 1}},
+                            upsert=True
                         )
                         st.session_state['topic_not_inserted_quizzer']=False
                     total_token_count = sum(len(encoding.encode(message["content"])) for message in st.session_state["quizzer_messages"])
@@ -418,16 +468,7 @@ if cookie_uid:
                     if total_token_count>tokens_left:
                         st.error("Quota for this course has been exceeded.")
                     else:
-                        result = db.users.update_one(
-                            {'user_id': uid}, 
-                            {'$inc': {'tokens_used': total_token_count}}  
-                        )
-                        if result.matched_count == 0:
-                            st.write("No token record found with that user_id.")
-                        # st.chat_message("user").write(topic_message)
                         st.sidebar.success(f"Quiz updated: {select_quiz}")
-                        # placeholder = st.empty()
-                        # placeholder.markdown('<div class="busy-icon"></div>', unsafe_allow_html=True)
                         st.session_state["generate_quiz_usr"]=topic_message
                         st.session_state["generate_quiz_button"]=st.session_state["quizzer_messages"]
                         
@@ -435,16 +476,61 @@ if cookie_uid:
         if st.button("End Quiz",help='show your score and incorrect questions'):
             st.session_state["quiz_ended"] = True
 
+
+    block_latex_pattern = re.compile(r"\\\[(.*?)\\\]", re.DOTALL)  # 块级公式 `\[ ... \]`
+    inline_latex_pattern = re.compile(r"\\\((.*?)\\\)|(?<!\\)\$(.*?)\$(?!\s*})")  # 行内公式 `\( ... \)` 和 `$...$`
+
+    def replace_inline_latex(text):
+        """ 将 \( ... \) 和 $ ... $ 统一转换为 $ ... $ 以便 Streamlit 渲染 """
+        return inline_latex_pattern.sub(lambda m: f"${m.group(1) or m.group(2)}$", text)
+
+    def parse_message(content):
+        elements = []
+        last_pos = 0
+
+        # 解析块级公式
+        for match in block_latex_pattern.finditer(content):
+            start, end = match.span()
+            text_before = content[last_pos:start].strip()
+            latex_code = match.group(1).strip()
+            
+            if text_before:
+                elements.append(("text", replace_inline_latex(text_before)))  # 处理行内公式
+            elements.append(("latex", latex_code))  # 添加 LaTeX 公式
+            last_pos = end
+
+        # 处理剩余部分
+        remaining_text = content[last_pos:].strip() if last_pos < len(content) else ""
+        if remaining_text:
+            formatted_text = replace_inline_latex(remaining_text)
+            elements.append(("markdown", formatted_text))
+
+        return elements
+
+    def render_message(content):
+        elements = parse_message(content)
+        for elem_type, elem_content in elements:
+            if elem_type == "latex":
+                st.latex(rf"""{elem_content}""")  # 直接渲染 LaTeX 公式
+            elif elem_type == "markdown":
+                st.markdown(elem_content, unsafe_allow_html=True)  # 解析行内公式
+            else:
+                st.write(elem_content) 
         
     for msg in st.session_state["quizzer_messages"]:
         if msg["role"] == "assistant":
-            msg["content"] = format_message(msg["content"])
-            if '<correct>' in msg["content"]:
-                st.chat_message("assistant").write('✅'+msg["content"].replace('<correct>', '').replace('</correct>', ''))
-            elif '<incorrect>' in msg["content"]:
-                st.chat_message("assistant").write('❌'+msg["content"].replace('<incorrect>', '').replace('</incorrect>', ''))
+            formatted_content = format_message(msg["content"])  # 先格式化消息
+
+            # 处理 `✅` 和 `❌`
+            if '<correct>' in formatted_content:
+                display_content = '✅ ' + formatted_content.replace('<correct>', '').replace('</correct>', '')
+            elif '<incorrect>' in formatted_content:
+                display_content = '❌ ' + formatted_content.replace('<incorrect>', '').replace('</incorrect>', '')
             else:
-                st.chat_message("assistant").write(msg["content"])
+                display_content = formatted_content
+
+            with st.chat_message("assistant"):
+                render_message(display_content)
         elif msg["role"] == "user":
             st.chat_message("user").write(msg["content"])
 
@@ -454,15 +540,17 @@ if cookie_uid:
         placeholder.markdown('<div class="busy-icon"></div>', unsafe_allow_html=True)
 
         response = client.chat.completions.create(
-            model="gpt-35-turbo-0613", 
+            # model="gpt-35-turbo-0613", 
+            model="gpt-4o-mini",
             messages=st.session_state["quizzer_messages"],
         )  
         assistant_msg = response.choices[0].message.content
 
         formatted_msg = format_message(assistant_msg)
-        placeholder.chat_message("assistant").write(formatted_msg)
+        with placeholder.chat_message("assistant"):
+            render_message(formatted_msg)
 
-        encoding = tiktoken.encoding_for_model("gpt-3.5-turbo")
+        encoding = tiktoken.encoding_for_model("gpt-4o-mini")
         tokens = encoding.encode(assistant_msg)
         completion_tokens = len(tokens)
         st.session_state["quizzer_messages"].append({"role": "assistant", "content": assistant_msg})
@@ -490,7 +578,9 @@ if cookie_uid:
         )
         db.users.update_one(
             {'user_id': uid}, 
-            {'$inc': {'tokens_used': total_token_count+ completion_tokens}}  
+            {'$inc': {'tokens_used': total_token_count+ completion_tokens
+                    # ,'tokens_available': -(total_token_count + completion_tokens)
+                    }}  
         )
         st.session_state["practice_quiz"]=False
         st.session_state["practice_quiz_usr"]=''
@@ -499,17 +589,25 @@ if cookie_uid:
         topic=st.session_state['generate_quiz_button']
         placeholder = st.empty()
         placeholder.markdown('<div class="busy-icon"></div>', unsafe_allow_html=True)
+        start_time = time.time()
 
         response = client.chat.completions.create(
-            model="gpt-35-turbo-0613", 
-            messages=st.session_state["quizzer_messages"],
+            # model="gpt-35-turbo-0613", 
+            model="gpt-4o-mini",
+            messages=st.session_state["quizzer_messages"]
         )  
-        assistant_msg = response.choices[0].message.content
 
+        end_time = time.time()
+        elapsed_time = end_time - start_time
+
+        assistant_msg = response.choices[0].message.content
         formatted_msg = format_message(assistant_msg)
-        placeholder.chat_message("assistant").write(formatted_msg)
-        
-        encoding = tiktoken.encoding_for_model("gpt-3.5-turbo")
+        with placeholder.chat_message("assistant"):
+            render_message(formatted_msg)
+        # placeholder.chat_message("assistant").write(formatted_msg)
+        if st.session_state["admin"]:
+            st.write(f"Elapsed time: {elapsed_time:.2f}s")
+        encoding = tiktoken.encoding_for_model("gpt-4o-mini")
         tokens = encoding.encode(assistant_msg)
         completion_tokens = len(tokens)
         st.session_state["quizzer_messages"].append({"role": "assistant", "content": assistant_msg})
@@ -537,10 +635,44 @@ if cookie_uid:
         )
         db.users.update_one(
             {'user_id': uid}, 
-            {'$inc': {'tokens_used': total_token_count+ completion_tokens}}  
+            {'$inc': {'tokens_used': total_token_count+ completion_tokens
+                    # ,'tokens_available': -(total_token_count + completion_tokens)
+                    }}  
         )
         st.session_state["generate_quiz_button"]=False
         st.session_state["generate_quiz_usr"]=''
+
+
+    def render_streamed_text(text, placeholder):
+        elements = []
+        last_pos = 0
+
+        # 处理块级公式
+        for match in block_latex_pattern.finditer(text):
+            start, end = match.span()
+            text_before = text[last_pos:start].strip()
+            latex_code = match.group(1).strip()
+
+            if text_before:
+                elements.append(("text", replace_inline_latex(text_before)))  # 处理行内公式
+            elements.append(("latex", latex_code))  # 块级公式
+            last_pos = end
+
+        # 处理剩余部分（包括行内公式）
+        remaining_text = text[last_pos:].strip() if last_pos < len(text) else ""
+        if remaining_text:
+            formatted_text = replace_inline_latex(remaining_text)  # 处理行内公式
+            elements.append(("markdown", formatted_text))
+
+        # **流式渲染**
+        with placeholder.chat_message("assistant"):
+            for elem_type, elem_content in elements:
+                if elem_type == "latex":
+                    st.latex(rf"""{elem_content}""")  # 块级公式
+                elif elem_type == "markdown":
+                    st.markdown(elem_content, unsafe_allow_html=True)  # 行内公式
+                else:
+                    st.write(elem_content) 
 
 
     prompt = st.chat_input()
@@ -552,10 +684,15 @@ if cookie_uid:
                     "topic_id": st.session_state['topic_id_quizzer'],
                     "user_id": uid,
                     "course_id": course_id,
-                    "latest_gpt_ver": 'gpt-35-turbo-0613',
+                    "latest_gpt_ver": 'gpt-4o-mini',
                     "chat_title": 'general',
                     "chatbot_type": "quizzer"
                 }
+            )
+            db.courses.update_one(
+                {"course_id": course_id},
+                {"$inc": {"quizzes_count": 1}},
+                upsert=True
             )
             st.session_state['topic_not_inserted_quizzer']=False
         st.chat_message("user").write(prompt)
@@ -570,12 +707,6 @@ if cookie_uid:
         if total_token_count>tokens_left:
             st.error("Quota for this course has been exceeded.")
         else:
-            result = db.users.update_one(
-                {'user_id': uid}, 
-                {'$inc': {'tokens_used': total_token_count}}  
-            )
-            if result.matched_count == 0:
-                st.write("No token record found with that user_id.")
             placeholder = st.empty()
             placeholder.markdown('<div class="busy-icon"></div>', unsafe_allow_html=True)
 
@@ -583,19 +714,25 @@ if cookie_uid:
             # Fetch AI response
             
             response = client.chat.completions.create(
-                model="gpt-35-turbo-0613", 
+                # model="gpt-35-turbo-0613", 
+                model="gpt-4o-mini",
                 messages=st.session_state["quizzer_messages"],
                 stream=True  
             )
             messages = []
-            for chunk in response:  # Iterate over the stream
-                if len(chunk.choices) > 0:
-                    # st.write("chunk.choices[0].delta.content",chunk.choices[0].delta.content)
-                    if chunk.choices[0].delta.content:
-                        messages.append(chunk.choices[0].delta.content)
-                        # placeholder.chat_message("assistant").write(''.join(messages))
+            # for chunk in response:  # Iterate over the stream
+            #     if len(chunk.choices) > 0:
+            #         if chunk.choices[0].delta.content:
+            #             messages.append(chunk.choices[0].delta.content)
+
+            for chunk in response:
+                if len(chunk.choices) > 0 and chunk.choices[0].delta.content:
+                    messages.append(chunk.choices[0].delta.content)  # 累积 GPT 输出
+                    render_streamed_text(''.join(messages), placeholder) 
+
+
             assistant_msg = ''.join(messages)
-            encoding = tiktoken.encoding_for_model("gpt-3.5-turbo")
+            encoding = tiktoken.encoding_for_model("gpt-4o-mini")
             tokens = encoding.encode(assistant_msg)
             completion_tokens = len(tokens)
             
@@ -636,7 +773,9 @@ if cookie_uid:
             )
             db.users.update_one(
                 {'user_id': uid}, 
-                {'$inc': {'tokens_used': total_token_count+ completion_tokens}}  
+                {'$inc': {'tokens_used': total_token_count+ completion_tokens
+                        # ,'tokens_available': -(total_token_count + completion_tokens)
+                        }}  
             )
             if "<correct>" in assistant_msg:
                 st.session_state["correct_assistant_msg"].append(assistant_msg)
@@ -668,8 +807,8 @@ if cookie_uid:
                             st.session_state["incorrect_questions"].append(question)
                         break
                 st.session_state["next_question_enabled"] = True 
-            else:
-                placeholder.chat_message("assistant").write(assistant_msg)
+            # else:
+            #     placeholder.chat_message("assistant").write(assistant_msg)
 
                 
     if button_clicked:= st.button("Next Question", disabled=not st.session_state["next_question_enabled"]):
@@ -686,26 +825,21 @@ if cookie_uid:
         if total_token_count>tokens_left:
             st.error("Quota for this course has been exceeded.")
         else:
-            result = db.users.update_one(
-                {'user_id': uid}, 
-                {'$inc': {'tokens_used': total_token_count}}  
-            )
-            if result.matched_count == 0:
-                st.write("No token record found with that user_id.")
             st.session_state["next_question_enabled"] = False
             placeholder = st.empty()
             placeholder.markdown('<div class="busy-icon"></div>', unsafe_allow_html=True)
 
             response = client.chat.completions.create(
-                model="gpt-35-turbo-0613", 
+                model="gpt-4o-mini",
                 messages=st.session_state["quizzer_messages"],
             )  
             assistant_msg = response.choices[0].message.content
 
             formatted_msg = format_message(assistant_msg)
-            placeholder.chat_message("assistant").write(formatted_msg)
+            with placeholder.chat_message("assistant"):
+                render_message(formatted_msg)
 
-            encoding = tiktoken.encoding_for_model("gpt-3.5-turbo")
+            encoding = tiktoken.encoding_for_model("gpt-4o-mini")
             tokens = encoding.encode(assistant_msg)
             completion_tokens = len(tokens)
 
@@ -734,7 +868,9 @@ if cookie_uid:
             )
             db.users.update_one(
                 {'user_id': uid}, 
-                {'$inc': {'tokens_used': total_token_count+ completion_tokens}}  
+                {'$inc': {'tokens_used': total_token_count+ completion_tokens
+                        # ,'tokens_available': -(total_token_count + completion_tokens)
+                        }}  
             )
 
             st.rerun()
@@ -751,6 +887,8 @@ if cookie_uid:
         st.session_state["score"] = 0
         st.session_state["num_answered"] = 0
         st.session_state["incorrect_questions"] = []
+        conn = create_connection()
+        cursor = conn.cursor()
         cursor.execute('''
             SELECT * FROM system_prompt
             WHERE course_id = ? AND chatbot_type = ?
@@ -758,7 +896,8 @@ if cookie_uid:
             LIMIT 1;
         ''', (course_id, 'quizzer'))
         latest_record = cursor.fetchone()
-
+        cursor.close()
+        conn.close()
         if latest_record:
 
             st.session_state["quizzer_messages"] = [
@@ -771,8 +910,4 @@ if cookie_uid:
     st.caption("Use Shift+Enter to add a new line.")
     st.sidebar.write("Disclaimer: This chatbot is provided for educational purposes only. Logs of your chat sessions will be saved and reviewed by the teaching team to improve the course content and chatbot experience.")
     st.sidebar.write("Support: If you encounter any issues or have any feedback, please reach out to the team via email at: gel.support@cityu.edu.hk.")
-
-
-    # Close the database connection when the script ends
-    conn.close()
 
