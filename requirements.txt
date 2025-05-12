@@ -1,4 +1,5 @@
 langchain
+dotenv
 openai
 duckduckgo-search
 trubrics

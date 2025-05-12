@@ -1,6 +1,5 @@
 import html
 import time
-
 import tiktoken
 import re
 import random
@@ -30,7 +29,9 @@ controller = CookieController()
 RemoveEmptyElementContainer()
 
 cookie_uid = controller.get('secrectID')
-cookie_cid = controller.get('course_id')            
+cookie_cid = controller.get('course_id')
+
+load_dotenv()
 
 key = 'mysecretkey'
 if cookie_uid:
@@ -38,9 +39,8 @@ if cookie_uid:
     if 'course_id' not in st.session_state:
         st.session_state['course_id'] = cookie_cid
 
-
     course_id=st.session_state['course_id']
-    staff=['manhlai','abchan','shujunxia2']
+    staff=[user.strip() for user in os.getenv('ADMIN_LIST', '').split(',') if user.strip()]
 
     if course_id[0]:
         # cursor.execute("""
@@ -53,7 +53,7 @@ if cookie_uid:
         teacher_id = course_data.get('teacher_id', '')
     else:
         st.error("Course ID not found!")
-        st.page_link("https://gel-student.cs.cityu.edu.hk/", label="Go Back to Home", icon="🏠")
+        st.page_link(os.getenv("GEL_HTTP_URL"), label="Go Back to Home", icon="🏠")
         st.stop() 
 
     if 'generate_question' not in st.session_state:
@@ -65,11 +65,8 @@ if cookie_uid:
     if 'topic_not_inserted_tutee' not in st.session_state:
         st.session_state['topic_not_inserted_tutee']=True
 
-
     if 'topic_id_tutee' not in st.session_state:
         st.session_state['topic_id_tutee'] = generate_id()
-        
-
 
     topic_id=st.session_state['topic_id_tutee']
 
@@ -80,8 +77,6 @@ if cookie_uid:
             st.session_state['admin']=True
         else:
             st.session_state['admin']=False
-
-    load_dotenv()
 
     azure_key = os.getenv("AZURE_KEY")
     azure_endpoint = os.getenv("AZURE_ENDPOINT")
@@ -362,7 +357,7 @@ if cookie_uid:
                                 "topic_id": st.session_state['topic_id_tutee'],
                                 "user_id": uid,
                                 "course_id": course_id,
-                                "latest_gpt_ver": 'gpt-35-turbo-0613',
+                                "latest_gpt_ver": os.getenv("AZURE_OPENAI_LATEST_GPT_VERSION"),
                                 "chat_title": 'general',
                                 "chatbot_type": "tutee"
                             }
@@ -429,7 +424,7 @@ if cookie_uid:
                             "topic_id": st.session_state['topic_id_tutee'],
                             "user_id": uid,
                             "course_id": course_id,
-                            "latest_gpt_ver": 'gpt-35-turbo-0613',
+                            "latest_gpt_ver": os.getenv("AZURE_OPENAI_LATEST_GPT_VERSION"),
                             "chat_title": 'general',
                             "chatbot_type": "tutee"
                         }
@@ -540,7 +535,7 @@ if cookie_uid:
         prmp.append({"role": "user", "content": question})
         response = client.chat.completions.create(
             # model="gpt-35-turbo-0613", 
-            model="gpt-4o-mini",
+            model=os.getenv("AZURE_OPENAI_LATEST_GPT_VERSION"),
             messages=prmp,
             stream=True    
         )
@@ -599,7 +594,7 @@ if cookie_uid:
         prmp.append({"role": "user", "content": random_question})
         response = client.chat.completions.create(
             # model="gpt-35-turbo-0613", 
-            model="gpt-4o-mini",
+            model=os.getenv("AZURE_OPENAI_LATEST_GPT_VERSION"),
             messages=prmp,
             stream=True    
         )
@@ -661,7 +656,7 @@ if cookie_uid:
                     "topic_id": st.session_state['topic_id_tutee'],
                     "user_id": uid,
                     "course_id": course_id,
-                    "latest_gpt_ver": 'gpt-35-turbo-0613',
+                    "latest_gpt_ver": os.getenv("AZURE_OPENAI_LATEST_GPT_VERSION"),
                     "chat_title": 'general',
                     "chatbot_type": "tutee"
                 }
@@ -685,7 +680,7 @@ if cookie_uid:
 
             response = client.chat.completions.create(
                 # model="gpt-35-turbo-0613", 
-                model="gpt-4o-mini",
+                model=os.getenv("AZURE_OPENAI_LATEST_GPT_VERSION"),
                 messages=st.session_state["tutee_messages"],
                 stream=True    
             )

@@ -1,1 +1,10 @@
 .env
+chatbot_old.db
+fullchain.pem
+privkey.pem
+select_med_from_wiki.py
+__pycache__/
+add_user_topics.py
+test_email.py
+test_sql.py
+test.py

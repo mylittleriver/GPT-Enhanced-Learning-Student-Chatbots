@@ -21,8 +21,6 @@ from streamlit_cookies_controller import CookieController, RemoveEmptyElementCon
 import os
 from dotenv import load_dotenv
 
-
-
 def decrypt_uid(encrypted_uid: str, key: str) -> str:
     if encrypted_uid:
         decoded_bytes = base64.urlsafe_b64decode(encrypted_uid.encode())
@@ -38,7 +36,6 @@ cookie_cid = controller.get('course_id')
 
 # st.write("secrectID: ",cookie_uid)
 
-
 key = 'mysecretkey'
 if cookie_uid:
     uid = decrypt_uid(cookie_uid, key)
@@ -49,7 +46,7 @@ if cookie_uid:
         st.session_state['course_id'] = cookie_cid
 
     course_id = st.session_state['course_id']
-
+    load_dotenv()
 
     if course_id[0]:
 
@@ -57,10 +54,8 @@ if cookie_uid:
         teacher_id = course_data.get('teacher_id', '')
     else:
         st.error("Course ID not found!")
-        st.page_link("https://gel-student.cs.cityu.edu.hk/", label="Go Back to Home", icon="🏠")
+        st.page_link(os.getenv("GEL_HTTP_URL"), label="Go Back to Home", icon="🏠")
         st.stop() 
-
-    
 
     if 'topic_not_inserted_tutor' not in st.session_state:
         st.session_state['topic_not_inserted_tutor'] = True
@@ -79,15 +74,13 @@ if cookie_uid:
 
     topic_id = st.session_state['topic_id_tutor']
 
-    staff=['manhlai','abchan','shujunxia2']
+    staff=[user.strip() for user in os.getenv('ADMIN_LIST', '').split(',') if user.strip()]
 
     if 'admin' not in st.session_state:
         if uid in staff or uid in teacher_id:
             st.session_state['admin']=True
         else:
             st.session_state['admin']=False
-
-    load_dotenv()
 
     azure_key = os.getenv("AZURE_KEY")
     azure_endpoint = os.getenv("AZURE_ENDPOINT")
@@ -101,15 +94,10 @@ if cookie_uid:
         azure_deployment=azure_deployment
     )
 
-
     def create_connection():
         # conn = sqlite3.connect('chatbot.db')
-        conn = sqlite3.connect("/app/chatbot.db", timeout=10)  # 设置超时时间，避免锁冲突
-        # conn.execute("PRAGMA journal_mode=WAL;")  # 启用 WAL 模式，允许多个进程访问
-        
+        conn = sqlite3.connect("/app/chatbot.db", timeout=10)          
         return conn
-
- 
 
     if 'correctness_api' not in st.session_state:
         conn = create_connection()
@@ -273,14 +261,10 @@ if cookie_uid:
                     update_correctness_api(1)
                 else:
                     update_correctness_api(0)
-            st.write("Current Correctness API Access:",st.session_state['correctness_api'])
-                    
-
-                
-            
+            st.write("Current Correctness API Access:",st.session_state['correctness_api'])     
 
         # st.write('Hint: Low correctness score means the chatbot has difficulty answering this question. You can flag the current answer as incorrect by clicking the "flag as incorrect" button below and ask this question again in Tutee Chatbot.')
-        flagged=st.button("flag as incorrect❌",help="flag the current answer as incorrect")
+        flagged=st.button("flag as incorrect❌", help="flag the current answer as incorrect")
         if flagged and st.session_state["similar"]==False:
             # Store the current question into the all_questions table
             if st.session_state["tutor_messages"] and st.session_state["correctness_score"]:
@@ -290,7 +274,7 @@ if cookie_uid:
                     conn = create_connection()
                     cursor = conn.cursor()
                     cursor.execute("""
-                        INSERT INTO all_questions (q_id, assessment, q_content, correctness_score, course_id,similarity_threshold, correctness_threshold_low, correctness_threshold_high)
+                        INSERT INTO all_questions (q_id, assessment, q_content, correctness_score, course_id, similarity_threshold, correctness_threshold_low, correctness_threshold_high)
                         VALUES (?, ?, ?,?, ?, ?, ?, ?)
                     """, (generate_id(), 'N/A',last_user_msg, st.session_state["correctness_score"], course_id, st.session_state['similarity_threshold'], st.session_state['correctness_threshold1'], st.session_state['correctness_threshold2']))
                     conn.commit()
@@ -451,9 +435,9 @@ if cookie_uid:
     @lru_cache(maxsize=128)
     def cached_simi_response(prompt):
         simi_prompt = prompt
-        # simi_url = "http://144.214.37.18:8091/similarity"
-        # simi_url = "http://144.214.37.18:8092/similarity"
-        simi_url = "http://144.214.37.18:8093/similarity"
+        # simi_url = os.getenv("CORR_SIMI_URL") + ":8091/similarity"
+        # simi_url = os.getenv("CORR_SIMI_URL") + ":8092/similarity""
+        simi_url = os.getenv("CORR_SIMI_URL") + ":8093/similarity"
         data = {
             "course_id": course_id,
             "assessment": [],
@@ -466,7 +450,7 @@ if cookie_uid:
     def get_gpt_response(messages):
         response = client.chat.completions.create(
             # model="gpt-35-turbo-0613",
-            model="gpt-4o-mini",
+            model=os.getenv("AZURE_OPENAI_LATEST_GPT_VERSION"),
             messages=messages,
             stream=True       
         )
@@ -474,8 +458,8 @@ if cookie_uid:
 
 
     def get_correctness_response(prompt,assistant_msg):
-        # correctness_url = "http://144.214.37.18:8070/correctness"
-        correctness_url = "http://144.214.37.18:8078/correctness"
+        # correctness_url = os.getenv("CORR_SIMI_URL") + ":8070/correctness"
+        correctness_url = os.getenv("CORR_SIMI_URL") + ":8078/correctness"
         data = {
             "question": prompt,
             "answer": assistant_msg
@@ -731,7 +715,7 @@ if cookie_uid:
                     "topic_id": st.session_state['topic_id_tutor'],
                     "user_id": uid,
                     "course_id": course_id,
-                    "latest_gpt_ver": 'gpt-4o-mini',
+                    "latest_gpt_ver": os.getenv("AZURE_OPENAI_LATEST_GPT_VERSION"),
                     "chat_title": 'general',
                     "chatbot_type": "tutor"
                 }

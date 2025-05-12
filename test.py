@@ -6,7 +6,12 @@ from pymongo import MongoClient
 client = MongoClient('mongodb://127.0.0.1:27017')
 db = client['gel_database']
 
+document = db.courses.find_one({"course_id": "CS5487"})
 
+if document:
+    print("A record from 'courses' collection:", document)
+else:
+    print("The 'courses' collection is empty.")
 
 # topics = db.topics.find({"course_id": 'CS5487', "chatbot_type": "quizzer"})
 # user = db.users.find({"user_id": 'shujunxia2'})
@@ -17,21 +22,21 @@ db = client['gel_database']
 
 # print(topic_users)
 
-course_id='CS4186'
-selected_uid='nicoletse4'
-chatbot_type='quizzer'
-search_dict = {"course_id": course_id}
-if selected_uid != "" and selected_uid != "Select a user":
-	search_dict["user_id"] = selected_uid
-if chatbot_type != "all":
-	search_dict["chatbot_type"] = chatbot_type
-print('search_dict',search_dict)
-topics = db.topics.find(search_dict,{ "_id": 0, "latest_gpt_ver": 0})
-topics = list(topics)
-topic_users = {topic["user_id"] for topic in topics}  
-print('topic_users',topic_users)
-print('topics',topics)
-# topic_summaries = []  
+# course_id='CS4186'
+# selected_uid='nicoletse4'
+# chatbot_type='quizzer'
+# search_dict = {"course_id": course_id}
+# if selected_uid != "" and selected_uid != "Select a user":
+# 	search_dict["user_id"] = selected_uid
+# if chatbot_type != "all":
+# 	search_dict["chatbot_type"] = chatbot_type
+# print('search_dict',search_dict)
+# topics = db.topics.find(search_dict,{ "_id": 0, "latest_gpt_ver": 0})
+# topics = list(topics)
+# topic_users = {topic["user_id"] for topic in topics}  
+# print('topic_users',topic_users)
+# print('topics',topics)
+# # topic_summaries = []  
 # topic_data = {}
 # for topic in topics:
 #     topic_id = topic['topic_id']
@@ -77,8 +82,8 @@ print('topics',topics)
 #         print(chat)
 
 
-from collections import defaultdict
-import re
+# from collections import defaultdict
+# import re
 
 # helper=['manhlai', 'njaison2', 'shujunxia2', 'jiayuan']
 # teacher_ids = db.courses.distinct("teacher_id")
